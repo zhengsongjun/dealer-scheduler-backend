@@ -1,0 +1,12 @@
+fastapi==0.115.*
+uvicorn[standard]==0.34.*
+sqlalchemy==2.0.*
+alembic==1.14.*
+psycopg2-binary==2.9.*
+pydantic==2.10.*
+python-jose[cryptography]==3.3.*
+ortools==9.11.*
+requests>=2.31
+openpyxl==3.1.*
+python-multipart==0.0.*
+python-dotenv>=1.0
