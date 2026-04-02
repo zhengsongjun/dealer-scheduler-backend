@@ -2,6 +2,12 @@ from pydantic import BaseModel
 from datetime import datetime
 
 
+class UserLoginRequest(BaseModel):
+    firstName: str
+    lastName: str
+    eeNumber: str
+
+
 class DealerCreate(BaseModel):
     id: str
     firstName: str

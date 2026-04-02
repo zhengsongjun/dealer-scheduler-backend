@@ -35,13 +35,15 @@ def requests_summary(week_start: str | None = None, db: Session = Depends(get_db
 
 
 @router.get("/availability")
-def requests_availability(week_start: str | None = None, db: Session = Depends(get_db), _=Depends(get_current_admin)):
+def requests_availability(week_start: str | None = None, page: int = Query(1, ge=1), size: int = Query(50, ge=1, le=500), db: Session = Depends(get_db), _=Depends(get_current_admin)):
     q = db.query(AvailabilityRequest, Dealer).outerjoin(
         Dealer, Dealer.id == AvailabilityRequest.dealer_id
     )
     if week_start:
         q = q.filter(AvailabilityRequest.week_start == date.fromisoformat(week_start))
-    rows = q.order_by(AvailabilityRequest.submitted_at.desc()).all()
+    q = q.order_by(AvailabilityRequest.submitted_at.desc())
+    total = q.count()
+    rows = q.offset((page - 1) * size).limit(size).all()
     result = []
     for r, dealer in rows:
         name = f"{dealer.first_name} {dealer.last_name}" if dealer else r.dealer_id
@@ -52,11 +54,11 @@ def requests_availability(week_start: str | None = None, db: Session = Depends(g
             "preferredDaysOff": r.preferred_days_off or [],
             "submittedAt": r.submitted_at.isoformat(),
         })
-    return result
+    return {"data": result, "total": total}
 
 
 @router.get("/time-off")
-def requests_time_off(week_start: str | None = None, status: str | None = None, db: Session = Depends(get_db), _=Depends(get_current_admin)):
+def requests_time_off(week_start: str | None = None, status: str | None = None, page: int = Query(1, ge=1), size: int = Query(50, ge=1, le=500), db: Session = Depends(get_db), _=Depends(get_current_admin)):
     q = db.query(TimeOffRequest, Dealer).outerjoin(
         Dealer, Dealer.id == TimeOffRequest.dealer_id
     )
@@ -66,7 +68,9 @@ def requests_time_off(week_start: str | None = None, status: str | None = None, 
         q = q.filter(TimeOffRequest.start_date <= we, TimeOffRequest.end_date >= ws)
     if status:
         q = q.filter(TimeOffRequest.status == status)
-    rows = q.order_by(TimeOffRequest.submitted_at.desc()).all()
+    q = q.order_by(TimeOffRequest.submitted_at.desc())
+    total = q.count()
+    rows = q.offset((page - 1) * size).limit(size).all()
     result = []
     for r, dealer in rows:
         name = f"{dealer.first_name} {dealer.last_name}" if dealer else r.dealer_id
@@ -77,17 +81,18 @@ def requests_time_off(week_start: str | None = None, status: str | None = None, 
             "reason": r.reason, "status": r.status,
             "submittedAt": r.submitted_at.isoformat(),
         })
-    return result
+    return {"data": result, "total": total}
 
 
 @router.get("/ride-share")
-def requests_ride_share(db: Session = Depends(get_db), _=Depends(get_current_admin)):
+def requests_ride_share(page: int = Query(1, ge=1), size: int = Query(50, ge=1, le=500), db: Session = Depends(get_db), _=Depends(get_current_admin)):
     q = db.query(RideShareRequest, Dealer).outerjoin(
         Dealer, Dealer.id == RideShareRequest.dealer_id
     ).filter(
         RideShareRequest.is_active == True
     ).order_by(RideShareRequest.created_at.desc())
-    rows = q.all()
+    total = q.count()
+    rows = q.offset((page - 1) * size).limit(size).all()
     result = []
     for r, dealer in rows:
         name = f"{dealer.first_name} {dealer.last_name}" if dealer else r.dealer_id
@@ -97,4 +102,4 @@ def requests_ride_share(db: Session = Depends(get_db), _=Depends(get_current_adm
             "partnerName": r.partner_name, "partnerEENumber": r.partner_ee_number,
             "createdAt": r.created_at.isoformat(),
         })
-    return result
+    return {"data": result, "total": total}

@@ -7,7 +7,8 @@ from ..models.schedule import Schedule, ScheduleEntry
 from ..models.time_off import TimeOffRequest
 from ..models.ride_share import RideShareRequest
 from ..models.availability import AvailabilityRequest
-from ..schemas.dealer import DealerCreate, DealerUpdate, DealerOut
+from ..schemas.dealer import DealerCreate, DealerUpdate, DealerOut, UserLoginRequest
+from sqlalchemy import func as sa_func
 from ..auth.jwt import get_current_admin
 
 router = APIRouter()
@@ -46,6 +47,41 @@ def list_dealers(
     total = q.count()
     dealers = q.order_by(Dealer.id).offset((page - 1) * size).limit(size).all()
     return {"total": total, "page": page, "size": size, "data": [_to_out(d) for d in dealers]}
+
+
+@router.get("/by-ee/{ee_number}")
+def get_dealer_by_ee(ee_number: str, db: Session = Depends(get_db)):
+    d = db.query(Dealer).filter(Dealer.ee_number == ee_number).first()
+    if not d:
+        raise HTTPException(status_code=404, detail="Dealer not found")
+    return _to_out(d)
+
+
+@router.post("/user-login")
+def user_login(req: UserLoginRequest, db: Session = Depends(get_db)):
+    d = db.query(Dealer).filter(Dealer.ee_number == req.eeNumber).first()
+    if d:
+        fn_match = d.first_name.lower() == req.firstName.strip().lower()
+        ln_match = d.last_name.lower() == req.lastName.strip().lower()
+        if fn_match or ln_match:
+            return _to_out(d)
+    # 没匹配上或不存在 → 新建 dealer
+    max_id = db.query(sa_func.max(Dealer.id)).scalar()
+    new_id = str(int(max_id) + 1) if max_id else "100001"
+    new_dealer = Dealer(
+        id=new_id,
+        ee_number=req.eeNumber,
+        first_name=req.firstName.strip(),
+        last_name=req.lastName.strip(),
+        type="tournament",
+        employment="full_time",
+        preferred_shift="flexible",
+        days_off=[],
+    )
+    db.add(new_dealer)
+    db.commit()
+    db.refresh(new_dealer)
+    return _to_out(new_dealer)
 
 
 @router.get("/{dealer_id}")

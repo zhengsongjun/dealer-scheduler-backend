@@ -130,6 +130,43 @@ def mock_time_off(dealer_ids):
     return rows
 
 
+def mock_ride_share(dealer_ids):
+    """Generate ride share requests: 3% of dealers (18 people) submit ride share requests."""
+    chosen = random.sample(dealer_ids, 18)
+    rows = []
+
+    for i, driver_id in enumerate(chosen):
+        # Each driver has 1-3 passengers
+        num_passengers = random.randint(1, 3)
+        # Pick random passengers from remaining dealers
+        passengers = random.sample([d for d in dealer_ids if d != driver_id], num_passengers)
+
+        for j, passenger_id in enumerate(passengers):
+            # Get passenger info from employees list
+            passenger_idx = int(passenger_id) - 100001
+            if 0 <= passenger_idx < len(employees):
+                passenger = employees[passenger_idx]
+                partner_name = f"{passenger['firstname']} {passenger['lastname']}"
+                partner_ee = passenger['eenumber']
+            else:
+                partner_name = f"Partner {j+1}"
+                partner_ee = None
+
+            rows.append({
+                "id": f"RS{len(rows)+1:06d}",
+                "dealer_id": driver_id,
+                "partner_name": partner_name,
+                "partner_ee_number": partner_ee,
+                "is_active": True,
+                "created_at": datetime.now(timezone.utc) - timedelta(
+                    hours=random.randint(1, 168),
+                    minutes=random.randint(0, 59),
+                ),
+            })
+
+    return rows
+
+
 def mock_carpool(dealer_ids):
     """2% of 600 = 12 people, split into 3-4 groups of 3-4 members each."""
     chosen = random.sample(dealer_ids, 12)
@@ -171,6 +208,7 @@ def main():
 
     avails = mock_availability(dealer_ids)
     time_offs = mock_time_off(dealer_ids)
+    ride_shares = mock_ride_share(dealer_ids)
     cp_groups, cp_members = mock_carpool(dealer_ids)
 
     with engine.begin() as conn:
@@ -206,6 +244,13 @@ def main():
                 VALUES (:id, :dealer_id, :start_date, :end_date, :reason, :status, :submitted_at)
             """), r)
 
+        # Insert ride share requests
+        for r in ride_shares:
+            conn.execute(text("""
+                INSERT INTO ride_share_requests (id, dealer_id, partner_name, partner_ee_number, is_active, created_at)
+                VALUES (:id, :dealer_id, :partner_name, :partner_ee_number, :is_active, :created_at)
+            """), r)
+
         # Insert carpool groups
         for g in cp_groups:
             conn.execute(text("""
@@ -224,6 +269,7 @@ def main():
     print(f"  dealers:               {len(dealers)}")
     print(f"  availability_requests: {len(avails)}")
     print(f"  time_off_requests:     {len(time_offs)}")
+    print(f"  ride_share_requests:   {len(ride_shares)}")
     print(f"  carpool_groups:        {len(cp_groups)}")
     print(f"  carpool_members:       {len(cp_members)}")
 

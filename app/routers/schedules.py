@@ -143,6 +143,25 @@ def generate_schedule(req: ScheduleGenerate, db: Session = Depends(get_db), _=De
     )
 
 
+@router.delete("")
+def clear_schedule(
+    week_start: str,
+    dealer_type: str = "tournament",
+    db: Session = Depends(get_db),
+    _=Depends(get_current_admin),
+):
+    ws = date.fromisoformat(week_start)
+    s = db.query(Schedule).filter(
+        Schedule.week_start == ws, Schedule.dealer_type == dealer_type
+    ).first()
+    if not s:
+        raise HTTPException(status_code=404, detail="No schedule found for this week")
+    db.query(ScheduleEntry).filter(ScheduleEntry.schedule_id == s.id).delete()
+    db.delete(s)
+    db.commit()
+    return {"message": "Schedule cleared"}
+
+
 @router.get("")
 def list_schedules(
     week_start: str | None = None,
