@@ -22,7 +22,7 @@ class DealerInfo:
     preferred_days_off: list[int] = field(default_factory=list)
     approved_time_off: list[date] = field(default_factory=list)
     ride_share_group: str | None = None
-    seniority_date: date | None = None  # hire date, older = more senior
+    ee_number: str | None = None  # employee number, smaller = more senior
 
 
 @dataclass
@@ -497,18 +497,30 @@ def _solve_cloud(
 # ── Local OR-Tools solver (fallback) ──
 
 def _compute_seniority_scores(dealers: list[DealerInfo], ref_date: date, max_score: int = 100) -> dict[str, int]:
-    """Compute seniority score: more senior (older hire_date) = higher score."""
+    """Compute seniority score: smaller ee_number = more senior = higher score."""
     scored = []
     for d in dealers:
-        if d.seniority_date:
-            days = (ref_date - d.seniority_date).days
+        if d.ee_number:
+            try:
+                scored.append((d.id, int(d.ee_number)))
+            except ValueError:
+                scored.append((d.id, None))
         else:
-            days = 0
-        scored.append((d.id, days))
-    if not scored:
+            scored.append((d.id, None))
+    valid = [(did, num) for did, num in scored if num is not None]
+    if not valid:
         return {}
-    max_days = max(s[1] for s in scored) or 1
-    return {did: int(max_score * days / max_days) for did, days in scored}
+    min_num = min(v[1] for v in valid)
+    max_num = max(v[1] for v in valid)
+    span = max_num - min_num or 1
+    result = {}
+    for did, num in scored:
+        if num is not None:
+            # smaller ee_number → higher score
+            result[did] = int(max_score * (max_num - num) / span)
+        else:
+            result[did] = 0
+    return result
 
 
 def _solve_local(

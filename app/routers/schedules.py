@@ -97,7 +97,7 @@ def generate_schedule(req: ScheduleGenerate, db: Session = Depends(get_db), _=De
             availability_shift=avail.shift if avail else None,
             preferred_days_off=(avail.preferred_days_off or []) if avail else [],
             approved_time_off=time_off_map.get(d.id, []),
-            seniority_date=d.seniority_date,
+            ee_number=d.ee_number,
         ))
 
     # 8. Load scheduler weights from DB
