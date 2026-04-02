@@ -34,7 +34,9 @@ def list_time_off(
     status: str | None = None,
     db: Session = Depends(get_db),
 ):
-    q = db.query(TimeOffRequest)
+    q = db.query(TimeOffRequest, Dealer).outerjoin(
+        Dealer, Dealer.id == TimeOffRequest.dealer_id
+    )
     if dealer_id:
         q = q.filter(TimeOffRequest.dealer_id == dealer_id)
     if status:
@@ -44,7 +46,15 @@ def list_time_off(
         ws = date.fromisoformat(week_start)
         we = ws + timedelta(days=6)
         q = q.filter(TimeOffRequest.start_date <= we, TimeOffRequest.end_date >= ws)
-    return [_to_out(r) for r in q.order_by(TimeOffRequest.submitted_at.desc()).all()]
+    rows = q.order_by(TimeOffRequest.submitted_at.desc()).all()
+    result = []
+    for r, dealer in rows:
+        out = _to_out(r)
+        d = out.model_dump()
+        d["dealerName"] = f"{dealer.first_name} {dealer.last_name}" if dealer else r.dealer_id
+        d["eeNumber"] = dealer.ee_number if dealer else None
+        result.append(d)
+    return result
 
 
 @router.post("", status_code=201)

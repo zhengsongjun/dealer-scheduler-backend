@@ -30,3 +30,14 @@ def save_projection(week_start: str, req: ProjectionSave, db: Session = Depends(
         db.add(p)
     db.commit()
     return {"weekStart": week_start, "message": "Projection saved"}
+
+
+@router.delete("/{week_start}")
+def delete_projection(week_start: str, db: Session = Depends(get_db), _=Depends(get_current_admin)):
+    ws = date.fromisoformat(week_start)
+    p = db.query(Projection).filter(Projection.week_start == ws).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="Projection not found")
+    db.delete(p)
+    db.commit()
+    return {"weekStart": week_start, "message": "Projection cleared"}

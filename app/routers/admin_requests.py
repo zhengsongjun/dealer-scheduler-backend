@@ -35,7 +35,7 @@ def requests_summary(week_start: str | None = None, db: Session = Depends(get_db
 
 
 @router.get("/availability")
-def requests_availability(week_start: str | None = None, page: int = Query(1, ge=1), size: int = Query(50, ge=1, le=500), db: Session = Depends(get_db), _=Depends(get_current_admin)):
+def requests_availability(week_start: str | None = None, page: int = Query(1, ge=1), size: int = Query(50, ge=1, le=10000), db: Session = Depends(get_db), _=Depends(get_current_admin)):
     q = db.query(AvailabilityRequest, Dealer).outerjoin(
         Dealer, Dealer.id == AvailabilityRequest.dealer_id
     )
