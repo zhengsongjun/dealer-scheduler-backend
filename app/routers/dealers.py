@@ -141,40 +141,48 @@ def get_dealer_schedule(dealer_id: str, week_start: str | None = None, db: Sessi
     d = db.query(Dealer).filter(Dealer.id == dealer_id).first()
     if not d:
         raise HTTPException(status_code=404, detail="Dealer not found")
-    q = db.query(Schedule).filter(Schedule.status == "published")
+    q = db.query(Schedule)
     if week_start:
         q = q.filter(Schedule.week_start == date.fromisoformat(week_start))
-    schedules = q.all()
-    entries = []
+    schedules = q.order_by(Schedule.week_start.desc()).all()
+
+    # Load all approved time-off for this dealer
+    all_toffs = db.query(TimeOffRequest).filter(
+        TimeOffRequest.dealer_id == dealer_id,
+        TimeOffRequest.status == "approved",
+    ).all()
+
+    weeks = []
     for s in schedules:
+        entries = []
         for e in db.query(ScheduleEntry).filter(
             ScheduleEntry.schedule_id == s.id, ScheduleEntry.dealer_id == dealer_id
         ).all():
             entries.append({"date": e.date.isoformat(), "shift": e.shift})
-    # 获取请假日期
-    time_off_dates = []
-    if week_start:
-        ws = date.fromisoformat(week_start)
+        # Time-off dates for this week
+        ws = s.week_start
         we = ws + timedelta(days=6)
-        toffs = db.query(TimeOffRequest).filter(
-            TimeOffRequest.dealer_id == dealer_id,
-            TimeOffRequest.status == "approved",
-            TimeOffRequest.start_date <= we,
-            TimeOffRequest.end_date >= ws,
-        ).all()
-        for t in toffs:
-            cur = max(t.start_date, ws)
-            end = min(t.end_date, we)
-            while cur <= end:
-                time_off_dates.append(cur.isoformat())
-                cur += timedelta(days=1)
-    return {
-        "dealerId": dealer_id,
-        "weekStart": week_start,
-        "entries": entries,
-        "timeOff": time_off_dates,
-        "daysOff": d.days_off or [],
-    }
+        time_off_dates = []
+        for t in all_toffs:
+            if t.start_date <= we and t.end_date >= ws:
+                cur = max(t.start_date, ws)
+                end = min(t.end_date, we)
+                while cur <= end:
+                    time_off_dates.append(cur.isoformat())
+                    cur += timedelta(days=1)
+        weeks.append({
+            "weekStart": ws.isoformat(),
+            "entries": entries,
+            "timeOff": time_off_dates,
+            "daysOff": d.days_off or [],
+        })
+
+    # Single-week backward compat
+    if week_start:
+        w = weeks[0] if weeks else {"weekStart": week_start, "entries": [], "timeOff": [], "daysOff": d.days_off or []}
+        return {"dealerId": dealer_id, **w}
+
+    return {"dealerId": dealer_id, "weeks": weeks}
 
 
 @router.get("/{dealer_id}/time-off")
