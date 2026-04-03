@@ -3,7 +3,7 @@ from datetime import datetime
 
 
 class TimeOffCreate(BaseModel):
-    dealerId: str
+    eeNumber: str
     startDate: str  # YYYY-MM-DD
     endDate: str
     reason: str | None = None

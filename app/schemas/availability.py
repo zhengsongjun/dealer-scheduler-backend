@@ -3,7 +3,7 @@ from datetime import datetime
 
 
 class AvailabilityCreate(BaseModel):
-    dealerId: str
+    eeNumber: str
     weekStart: str  # YYYY-MM-DD
     shift: str  # day | swing | mixed
     preferredDaysOff: list[int] = []

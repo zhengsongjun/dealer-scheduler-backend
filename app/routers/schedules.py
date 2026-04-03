@@ -70,20 +70,27 @@ def generate_schedule(req: ScheduleGenerate, db: Session = Depends(get_db), _=De
     ).all()
     avail_map = {a.dealer_id: a for a in avails}
 
-    # 6. Load ride share groups (group by dealer_id)
+    # 6. Load ride share groups (group by dealer_id, filtered by week)
     ride_shares = db.query(RideShareRequest).filter(
-        RideShareRequest.is_active == True
+        RideShareRequest.is_active == True,
+        RideShareRequest.week_start == ws,
     ).all()
     rs_groups_raw: dict[str, list[str]] = {}
     for rs in ride_shares:
         rs_groups_raw.setdefault(rs.dealer_id, [])
         if rs.partner_ee_number:
             rs_groups_raw[rs.dealer_id].append(rs.partner_ee_number)
+    # Build ee_number -> dealer.id mapping for partner lookup
+    ee_to_id = {d.ee_number: d.id for d in db_dealers if d.ee_number}
     ride_share_groups = []
-    for did, partners in rs_groups_raw.items():
-        members = [did] + [p for p in partners if p in {d.id for d in db_dealers}]
-        if len(members) >= 2:
-            ride_share_groups.append(RideShareGroup(group_key=did, member_ids=members))
+    for did, partner_ees in rs_groups_raw.items():
+        member_ids = [did]
+        for ee in partner_ees:
+            pid = ee_to_id.get(ee)
+            if pid:
+                member_ids.append(pid)
+        if len(member_ids) >= 2:
+            ride_share_groups.append(RideShareGroup(group_key=did, member_ids=member_ids))
 
     # 7. Build DealerInfo list
     dealer_infos = []

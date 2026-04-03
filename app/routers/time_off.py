@@ -60,12 +60,12 @@ def list_time_off(
 @router.post("", status_code=201)
 def create_time_off(req: TimeOffCreate, db: Session = Depends(get_db)):
     from datetime import date
-    d = db.query(Dealer).filter(Dealer.id == req.dealerId).first()
+    d = db.query(Dealer).filter(Dealer.ee_number == req.eeNumber).first()
     if not d:
         raise HTTPException(status_code=404, detail="Dealer not found")
     new_id = _next_id(db)
     r = TimeOffRequest(
-        id=new_id, dealer_id=req.dealerId,
+        id=new_id, dealer_id=d.id,
         start_date=date.fromisoformat(req.startDate),
         end_date=date.fromisoformat(req.endDate),
         reason=req.reason,

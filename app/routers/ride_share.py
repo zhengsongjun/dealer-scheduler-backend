@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from datetime import date
 from ..database import get_db
 from ..models.ride_share import RideShareRequest
 from ..models.dealer import Dealer
@@ -12,6 +13,7 @@ router = APIRouter()
 def _to_out(r: RideShareRequest) -> RideShareOut:
     return RideShareOut(
         id=r.id, dealerId=r.dealer_id,
+        weekStart=r.week_start,
         partnerName=r.partner_name, partnerEENumber=r.partner_ee_number,
         isActive=r.is_active, createdAt=r.created_at,
     )
@@ -26,23 +28,26 @@ def _next_id(db: Session) -> str:
 
 
 @router.get("")
-def list_ride_share(dealer_id: str | None = None, db: Session = Depends(get_db)):
+def list_ride_share(dealer_id: str | None = None, week_start: str | None = None, db: Session = Depends(get_db)):
     q = db.query(RideShareRequest).filter(RideShareRequest.is_active == True)
     if dealer_id:
         q = q.filter(RideShareRequest.dealer_id == dealer_id)
+    if week_start:
+        q = q.filter(RideShareRequest.week_start == date.fromisoformat(week_start))
     return [_to_out(r) for r in q.order_by(RideShareRequest.created_at.desc()).all()]
 
 
 @router.post("", status_code=201)
 def create_ride_share(req: RideShareCreate, db: Session = Depends(get_db)):
-    d = db.query(Dealer).filter(Dealer.id == req.dealerId).first()
+    d = db.query(Dealer).filter(Dealer.ee_number == req.eeNumber).first()
     if not d:
         raise HTTPException(status_code=404, detail="Dealer not found")
     ids = []
+    ws = date.fromisoformat(req.weekStart)
     for p in req.partners:
         rid = _next_id(db)
         r = RideShareRequest(
-            id=rid, dealer_id=req.dealerId,
+            id=rid, dealer_id=d.id, week_start=ws,
             partner_name=p.partnerName, partner_ee_number=p.partnerEENumber,
         )
         db.add(r)

@@ -6,7 +6,7 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:123456@localhost:5432/dealer_manager")
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-in-production")
 JWT_ALGORITHM = "HS256"
-JWT_EXPIRE_MINUTES = 480  # 8 hours
+JWT_EXPIRE_MINUTES = 525600  # 365 days
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 

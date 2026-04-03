@@ -134,21 +134,25 @@ def delete_dealer(dealer_id: str, db: Session = Depends(get_db), _=Depends(get_c
     return {"id": d.id, "message": "Dealer deactivated"}
 
 
-# === 用户端数据查询接口（无需认证） ===
+# === 用户端数据查询接口（按 ee_number 查询，无需认证） ===
 
-@router.get("/{dealer_id}/schedule")
-def get_dealer_schedule(dealer_id: str, week_start: str | None = None, db: Session = Depends(get_db)):
-    d = db.query(Dealer).filter(Dealer.id == dealer_id).first()
+def _get_dealer_by_ee(ee_number: str, db: Session) -> Dealer:
+    d = db.query(Dealer).filter(Dealer.ee_number == ee_number).first()
     if not d:
         raise HTTPException(status_code=404, detail="Dealer not found")
+    return d
+
+
+@router.get("/ee/{ee_number}/schedule")
+def get_dealer_schedule(ee_number: str, week_start: str | None = None, db: Session = Depends(get_db)):
+    d = _get_dealer_by_ee(ee_number, db)
     q = db.query(Schedule)
     if week_start:
         q = q.filter(Schedule.week_start == date.fromisoformat(week_start))
     schedules = q.order_by(Schedule.week_start.desc()).all()
 
-    # Load all approved time-off for this dealer
     all_toffs = db.query(TimeOffRequest).filter(
-        TimeOffRequest.dealer_id == dealer_id,
+        TimeOffRequest.dealer_id == d.id,
         TimeOffRequest.status == "approved",
     ).all()
 
@@ -156,10 +160,9 @@ def get_dealer_schedule(dealer_id: str, week_start: str | None = None, db: Sessi
     for s in schedules:
         entries = []
         for e in db.query(ScheduleEntry).filter(
-            ScheduleEntry.schedule_id == s.id, ScheduleEntry.dealer_id == dealer_id
+            ScheduleEntry.schedule_id == s.id, ScheduleEntry.dealer_id == d.id
         ).all():
             entries.append({"date": e.date.isoformat(), "shift": e.shift})
-        # Time-off dates for this week
         ws = s.week_start
         we = ws + timedelta(days=6)
         time_off_dates = []
@@ -177,18 +180,18 @@ def get_dealer_schedule(dealer_id: str, week_start: str | None = None, db: Sessi
             "daysOff": d.days_off or [],
         })
 
-    # Single-week backward compat
     if week_start:
         w = weeks[0] if weeks else {"weekStart": week_start, "entries": [], "timeOff": [], "daysOff": d.days_off or []}
-        return {"dealerId": dealer_id, **w}
+        return {"eeNumber": ee_number, **w}
 
-    return {"dealerId": dealer_id, "weeks": weeks}
+    return {"eeNumber": ee_number, "weeks": weeks}
 
 
-@router.get("/{dealer_id}/time-off")
-def get_dealer_time_off(dealer_id: str, db: Session = Depends(get_db)):
+@router.get("/ee/{ee_number}/time-off")
+def get_dealer_time_off(ee_number: str, db: Session = Depends(get_db)):
+    d = _get_dealer_by_ee(ee_number, db)
     reqs = db.query(TimeOffRequest).filter(
-        TimeOffRequest.dealer_id == dealer_id
+        TimeOffRequest.dealer_id == d.id
     ).order_by(TimeOffRequest.submitted_at.desc()).all()
     return [{
         "id": r.id, "startDate": r.start_date.isoformat(),
@@ -197,21 +200,27 @@ def get_dealer_time_off(dealer_id: str, db: Session = Depends(get_db)):
     } for r in reqs]
 
 
-@router.get("/{dealer_id}/ride-share")
-def get_dealer_ride_share(dealer_id: str, db: Session = Depends(get_db)):
+@router.get("/ee/{ee_number}/ride-share")
+def get_dealer_ride_share(ee_number: str, week_start: str | None = None, db: Session = Depends(get_db)):
+    d = _get_dealer_by_ee(ee_number, db)
     reqs = db.query(RideShareRequest).filter(
-        RideShareRequest.dealer_id == dealer_id, RideShareRequest.is_active == True
-    ).order_by(RideShareRequest.created_at.desc()).all()
+        RideShareRequest.dealer_id == d.id, RideShareRequest.is_active == True
+    )
+    if week_start:
+        reqs = reqs.filter(RideShareRequest.week_start == date.fromisoformat(week_start))
+    reqs = reqs.order_by(RideShareRequest.created_at.desc()).all()
     return [{
         "id": r.id, "partnerName": r.partner_name,
         "partnerEENumber": r.partner_ee_number,
+        "weekStart": r.week_start.isoformat() if r.week_start else None,
         "createdAt": r.created_at.isoformat(),
     } for r in reqs]
 
 
-@router.get("/{dealer_id}/availability")
-def get_dealer_availability(dealer_id: str, week_start: str | None = None, db: Session = Depends(get_db)):
-    q = db.query(AvailabilityRequest).filter(AvailabilityRequest.dealer_id == dealer_id)
+@router.get("/ee/{ee_number}/availability")
+def get_dealer_availability(ee_number: str, week_start: str | None = None, db: Session = Depends(get_db)):
+    d = _get_dealer_by_ee(ee_number, db)
+    q = db.query(AvailabilityRequest).filter(AvailabilityRequest.dealer_id == d.id)
     if week_start:
         q = q.filter(AvailabilityRequest.week_start == date.fromisoformat(week_start))
     reqs = q.order_by(AvailabilityRequest.submitted_at.desc()).all()

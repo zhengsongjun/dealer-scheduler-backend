@@ -29,7 +29,8 @@ def requests_summary(week_start: str | None = None, db: Session = Depends(get_db
                 TimeOffRequest.end_date >= ws,
             ).count()
         result["rideShare"]["active"] = db.query(RideShareRequest).filter(
-            RideShareRequest.is_active == True
+            RideShareRequest.is_active == True,
+            RideShareRequest.week_start == ws,
         ).count()
     return result
 
@@ -85,21 +86,38 @@ def requests_time_off(week_start: str | None = None, status: str | None = None, 
 
 
 @router.get("/ride-share")
-def requests_ride_share(page: int = Query(1, ge=1), size: int = Query(50, ge=1, le=500), db: Session = Depends(get_db), _=Depends(get_current_admin)):
+def requests_ride_share(week_start: str | None = None, page: int = Query(1, ge=1), size: int = Query(50, ge=1, le=500), db: Session = Depends(get_db), _=Depends(get_current_admin)):
     q = db.query(RideShareRequest, Dealer).outerjoin(
         Dealer, Dealer.id == RideShareRequest.dealer_id
     ).filter(
         RideShareRequest.is_active == True
-    ).order_by(RideShareRequest.created_at.desc())
-    total = q.count()
-    rows = q.offset((page - 1) * size).limit(size).all()
-    result = []
+    )
+    if week_start:
+        q = q.filter(RideShareRequest.week_start == date.fromisoformat(week_start))
+    q = q.order_by(RideShareRequest.created_at.desc())
+    rows = q.all()
+
+    # Group by dealer_id + week_start
+    from collections import OrderedDict
+    groups: dict[tuple, dict] = OrderedDict()
     for r, dealer in rows:
-        name = f"{dealer.first_name} {dealer.last_name}" if dealer else r.dealer_id
-        result.append({
-            "id": r.id, "dealerId": r.dealer_id, "dealerName": name,
-            "eeNumber": dealer.ee_number if dealer else None,
-            "partnerName": r.partner_name, "partnerEENumber": r.partner_ee_number,
-            "createdAt": r.created_at.isoformat(),
+        key = (r.dealer_id, r.week_start.isoformat() if r.week_start else None)
+        if key not in groups:
+            name = f"{dealer.first_name} {dealer.last_name}" if dealer else r.dealer_id
+            groups[key] = {
+                "dealerId": r.dealer_id, "dealerName": name,
+                "eeNumber": dealer.ee_number if dealer else None,
+                "weekStart": r.week_start.isoformat() if r.week_start else None,
+                "createdAt": r.created_at.isoformat(),
+                "partners": [],
+            }
+        groups[key]["partners"].append({
+            "id": r.id,
+            "partnerName": r.partner_name,
+            "partnerEENumber": r.partner_ee_number,
         })
-    return {"data": result, "total": total}
+
+    all_groups = list(groups.values())
+    total = len(all_groups)
+    paginated = all_groups[(page - 1) * size: (page - 1) * size + size]
+    return {"data": paginated, "total": total}

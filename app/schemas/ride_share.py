@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, date
 
 
 class RideSharePartner(BaseModel):
@@ -8,13 +8,15 @@ class RideSharePartner(BaseModel):
 
 
 class RideShareCreate(BaseModel):
-    dealerId: str
+    eeNumber: str
+    weekStart: str
     partners: list[RideSharePartner]
 
 
 class RideShareOut(BaseModel):
     id: str
     dealerId: str
+    weekStart: date | None
     partnerName: str
     partnerEENumber: str | None
     isActive: bool

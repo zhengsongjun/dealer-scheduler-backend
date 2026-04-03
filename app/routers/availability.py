@@ -36,12 +36,12 @@ def list_availability(
 
 @router.post("", status_code=201)
 def create_availability(req: AvailabilityCreate, db: Session = Depends(get_db)):
-    d = db.query(Dealer).filter(Dealer.id == req.dealerId).first()
+    d = db.query(Dealer).filter(Dealer.ee_number == req.eeNumber).first()
     if not d:
         raise HTTPException(status_code=404, detail="Dealer not found")
     ws = date.fromisoformat(req.weekStart)
     existing = db.query(AvailabilityRequest).filter(
-        AvailabilityRequest.dealer_id == req.dealerId,
+        AvailabilityRequest.dealer_id == d.id,
         AvailabilityRequest.week_start == ws,
     ).first()
     if existing:
@@ -51,7 +51,7 @@ def create_availability(req: AvailabilityCreate, db: Session = Depends(get_db)):
         db.commit()
         return {"id": existing.id}
     r = AvailabilityRequest(
-        dealer_id=req.dealerId, week_start=ws,
+        dealer_id=d.id, week_start=ws,
         shift=req.shift, preferred_days_off=req.preferredDaysOff,
     )
     db.add(r)
