@@ -65,7 +65,7 @@ def user_login(req: UserLoginRequest, db: Session = Depends(get_db)):
         ln_match = d.last_name.lower() == req.lastName.strip().lower()
         if fn_match or ln_match:
             return _to_out(d)
-    # 没匹配上或不存在 → 新建 dealer
+    # No match or not found — create new dealer
     max_id = db.query(sa_func.max(Dealer.id)).scalar()
     new_id = str(int(max_id) + 1) if max_id else "100001"
     new_dealer = Dealer(
@@ -134,7 +134,7 @@ def delete_dealer(dealer_id: str, db: Session = Depends(get_db), _=Depends(get_c
     return {"id": d.id, "message": "Dealer deactivated"}
 
 
-# === 用户端数据查询接口（按 ee_number 查询，无需认证） ===
+# === User-side data query endpoints (by ee_number, no auth required) ===
 
 def _get_dealer_by_ee(ee_number: str, db: Session) -> Dealer:
     d = db.query(Dealer).filter(Dealer.ee_number == ee_number).first()

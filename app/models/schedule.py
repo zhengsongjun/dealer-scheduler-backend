@@ -1,5 +1,6 @@
-from sqlalchemy import String, Integer, Date, ForeignKey, func
+from sqlalchemy import String, Integer, Date, ForeignKey, func, Text
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.dialects.postgresql import JSONB
 from datetime import date, datetime
 from ..database import Base
 
@@ -13,6 +14,7 @@ class Schedule(Base):
     status: Mapped[str] = mapped_column(String(20), default="draft")  # draft | published
     generated_at: Mapped[datetime] = mapped_column(server_default=func.now())
     published_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    stats: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 
 class ScheduleEntry(Base):

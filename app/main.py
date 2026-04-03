@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from .routers import auth, dealers, time_off, availability, ride_share, projections, schedules, admin_requests, scheduler_config
+from .routers import auth, dealers, time_off, availability, ride_share, projections, schedules, admin_requests, scheduler_config, notifications
 
 app = FastAPI(title="Dealer Manager API", version="1.0.0")
 
@@ -21,6 +21,7 @@ app.include_router(projections.router, prefix="/api/v1/projections", tags=["Proj
 app.include_router(schedules.router, prefix="/api/v1/schedules", tags=["Schedules"])
 app.include_router(admin_requests.router, prefix="/api/v1/admin/requests", tags=["Admin Requests"])
 app.include_router(scheduler_config.router, prefix="/api/v1/scheduler-config", tags=["Scheduler Config"])
+app.include_router(notifications.router, prefix="/api/v1/notifications", tags=["Notifications"])
 
 
 @app.get("/health")

@@ -1,15 +1,18 @@
+import threading
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from datetime import date, datetime, timezone, timedelta
-from ..database import get_db
+from ..database import get_db, SessionLocal
 from ..models.schedule import Schedule, ScheduleEntry
 from ..models.dealer import Dealer
 from ..models.projection import Projection
 from ..models.time_off import TimeOffRequest
 from ..models.availability import AvailabilityRequest
 from ..models.ride_share import RideShareRequest
-from ..schemas.schedule import ScheduleGenerate, ScheduleOut, ScheduleEntryOut, GenerateResult
+from ..models.notification import Notification
+from ..schemas.schedule import ScheduleGenerate, ScheduleOut, ScheduleEntryOut, GenerateResult, TaskStartResult, TaskStatusOut
 from ..services.scheduler import solve, DealerInfo, SlotDemand, RideShareGroup, SchedulerWeights
+from ..services.task_manager import create_task, update_task, get_task, TaskStatus
 from ..models.scheduler_config import SchedulerConfig
 from ..auth.jwt import get_current_admin
 
@@ -19,135 +22,260 @@ router = APIRouter()
 @router.post("/generate")
 def generate_schedule(req: ScheduleGenerate, db: Session = Depends(get_db), _=Depends(get_current_admin)):
     ws = date.fromisoformat(req.weekStart)
-    week_dates = [ws + timedelta(days=i) for i in range(7)]
 
-    # 1. Load projection
+    # Validate projection exists before starting background task
     proj = db.query(Projection).filter(Projection.week_start == ws).first()
     if not proj:
         raise HTTPException(status_code=400, detail="No projection found for this week")
 
-    # 2. Parse demands from projection data (aggregate same date+shift)
-    demand_agg: dict[tuple[date, str], int] = {}
-    for day_data in proj.data:
-        d = date.fromisoformat(day_data["date"])
-        for slot in day_data.get("slots", []):
-            time_str = slot["time"].upper().strip()
-            if "9" in time_str or "10" in time_str or "11" in time_str or "12" in time_str:
-                shift = "9AM"
-            else:
-                shift = "4PM"
-            key = (d, shift)
-            demand_agg[key] = demand_agg.get(key, 0) + slot["dealersNeeded"]
-    demands: list[SlotDemand] = [
-        SlotDemand(date=k[0], shift=k[1], dealers_needed=v) for k, v in demand_agg.items()
-    ]
-
-    # 3. Load dealers
     db_dealers = db.query(Dealer).filter(
         Dealer.type == req.dealerType, Dealer.is_active == True
     ).all()
     if not db_dealers:
         raise HTTPException(status_code=400, detail="No active dealers of this type")
 
-    # 4. Load approved time-off
-    we = ws + timedelta(days=6)
-    time_offs = db.query(TimeOffRequest).filter(
-        TimeOffRequest.status == "approved",
-        TimeOffRequest.start_date <= we,
-        TimeOffRequest.end_date >= ws,
-    ).all()
-    time_off_map: dict[str, list[date]] = {}
-    for to in time_offs:
-        cur = max(to.start_date, ws)
-        end = min(to.end_date, we)
-        while cur <= end:
-            time_off_map.setdefault(to.dealer_id, []).append(cur)
-            cur += timedelta(days=1)
+    task_id = create_task()
+    threading.Thread(
+        target=_run_generate,
+        args=(task_id, req.weekStart, req.dealerType),
+        daemon=True,
+    ).start()
 
-    # 5. Load availability submissions
-    avails = db.query(AvailabilityRequest).filter(
-        AvailabilityRequest.week_start == ws
-    ).all()
-    avail_map = {a.dealer_id: a for a in avails}
+    return TaskStartResult(taskId=task_id)
 
-    # 6. Load ride share groups (group by dealer_id, filtered by week)
-    ride_shares = db.query(RideShareRequest).filter(
-        RideShareRequest.is_active == True,
-        RideShareRequest.week_start == ws,
-    ).all()
-    rs_groups_raw: dict[str, list[str]] = {}
-    for rs in ride_shares:
-        rs_groups_raw.setdefault(rs.dealer_id, [])
-        if rs.partner_ee_number:
-            rs_groups_raw[rs.dealer_id].append(rs.partner_ee_number)
-    # Build ee_number -> dealer.id mapping for partner lookup
-    ee_to_id = {d.ee_number: d.id for d in db_dealers if d.ee_number}
-    ride_share_groups = []
-    for did, partner_ees in rs_groups_raw.items():
-        member_ids = [did]
-        for ee in partner_ees:
-            pid = ee_to_id.get(ee)
-            if pid:
-                member_ids.append(pid)
-        if len(member_ids) >= 2:
-            ride_share_groups.append(RideShareGroup(group_key=did, member_ids=member_ids))
 
-    # 7. Build DealerInfo list
-    dealer_infos = []
-    for d in db_dealers:
-        avail = avail_map.get(d.id)
-        dealer_infos.append(DealerInfo(
-            id=d.id,
-            employment=d.employment,
-            days_off=d.days_off or [],
-            preferred_shift=d.preferred_shift or "flexible",
-            availability_shift=avail.shift if avail else None,
-            preferred_days_off=(avail.preferred_days_off or []) if avail else [],
-            approved_time_off=time_off_map.get(d.id, []),
-            ee_number=d.ee_number,
-        ))
-
-    # 8. Load scheduler weights from DB
-    config_rows = db.query(SchedulerConfig).all()
-    weight_map = {r.key: r.value for r in config_rows}
-    weights = SchedulerWeights(**{k: weight_map[k] for k in weight_map if hasattr(SchedulerWeights, k)})
-
-    # 9. Solve
-    result = solve(dealer_infos, demands, ride_share_groups, ws, weights=weights)
-
-    # 9. Save to DB
-    existing = db.query(Schedule).filter(
-        Schedule.week_start == ws, Schedule.dealer_type == req.dealerType
-    ).first()
-    if existing:
-        db.query(ScheduleEntry).filter(ScheduleEntry.schedule_id == existing.id).delete()
-        existing.generated_at = datetime.now(timezone.utc)
-        existing.status = "draft"
-        existing.published_at = None
-        db.flush()
-        schedule = existing
-    else:
-        schedule = Schedule(week_start=ws, dealer_type=req.dealerType)
-        db.add(schedule)
-        db.flush()
-
-    for dealer_id, assign_date, shift in result.assignments:
-        entry = ScheduleEntry(
-            schedule_id=schedule.id,
-            dealer_id=dealer_id,
-            date=assign_date,
-            shift=shift,
-        )
-        db.add(entry)
-    db.commit()
-
-    return GenerateResult(
-        scheduleId=schedule.id,
-        totalAssignments=result.total_assignments,
-        unfilledSlots=result.unfilled_slots,
-        solverStatus=result.solver_status,
-        solveTimeMs=result.solve_time_ms,
+@router.get("/tasks/{task_id}")
+def get_task_status(task_id: str):
+    t = get_task(task_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Task not found")
+    result = None
+    if t.result:
+        result = GenerateResult(**t.result)
+    return TaskStatusOut(
+        taskId=t.task_id, status=t.status.value,
+        progress=t.progress, phase=t.phase,
+        result=result, error=t.error,
     )
+
+
+def _run_generate(task_id: str, week_start_str: str, dealer_type: str):
+    """Background thread: load data, solve, save, create notification."""
+    import logging
+    logger = logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        ws = date.fromisoformat(week_start_str)
+        we = ws + timedelta(days=6)
+
+        # Phase 1: Loading data (0-20%)
+        update_task(task_id, status=TaskStatus.LOADING, progress=5, phase="Loading projection data")
+        proj = db.query(Projection).filter(Projection.week_start == ws).first()
+        demand_agg: dict[tuple[date, str], int] = {}
+        for day_data in proj.data:
+            d = date.fromisoformat(day_data["date"])
+            for slot in day_data.get("slots", []):
+                time_str = slot["time"].upper().strip()
+                shift = "9AM" if ("9" in time_str or "10" in time_str or "11" in time_str or "12" in time_str) else "4PM"
+                key = (d, shift)
+                demand_agg[key] = demand_agg.get(key, 0) + slot["dealersNeeded"]
+        demands = [SlotDemand(date=k[0], shift=k[1], dealers_needed=v) for k, v in demand_agg.items()]
+
+        update_task(task_id, progress=10, phase="Loading dealer data")
+        db_dealers = db.query(Dealer).filter(Dealer.type == dealer_type, Dealer.is_active == True).all()
+
+        time_offs = db.query(TimeOffRequest).filter(
+            TimeOffRequest.status == "approved", TimeOffRequest.start_date <= we, TimeOffRequest.end_date >= ws,
+        ).all()
+        time_off_map: dict[str, list[date]] = {}
+        for to in time_offs:
+            cur = max(to.start_date, ws)
+            end = min(to.end_date, we)
+            while cur <= end:
+                time_off_map.setdefault(to.dealer_id, []).append(cur)
+                cur += timedelta(days=1)
+
+        avails = db.query(AvailabilityRequest).filter(AvailabilityRequest.week_start == ws).all()
+        avail_map = {a.dealer_id: a for a in avails}
+
+        ride_shares = db.query(RideShareRequest).filter(
+            RideShareRequest.is_active == True, RideShareRequest.week_start == ws,
+        ).all()
+        rs_groups_raw: dict[str, list[str]] = {}
+        for rs in ride_shares:
+            rs_groups_raw.setdefault(rs.dealer_id, [])
+            if rs.partner_ee_number:
+                rs_groups_raw[rs.dealer_id].append(rs.partner_ee_number)
+        ee_to_id = {d.ee_number: d.id for d in db_dealers if d.ee_number}
+        ride_share_groups = []
+        for did, partner_ees in rs_groups_raw.items():
+            member_ids = [did]
+            for ee in partner_ees:
+                pid = ee_to_id.get(ee)
+                if pid:
+                    member_ids.append(pid)
+            if len(member_ids) >= 2:
+                ride_share_groups.append(RideShareGroup(group_key=did, member_ids=member_ids))
+
+        update_task(task_id, progress=15, phase="Building schedule model")
+        dealer_infos = []
+        for d in db_dealers:
+            avail = avail_map.get(d.id)
+            dealer_infos.append(DealerInfo(
+                id=d.id, employment=d.employment, days_off=d.days_off or [],
+                preferred_shift=d.preferred_shift or "flexible",
+                availability_shift=avail.shift if avail else None,
+                preferred_days_off=(avail.preferred_days_off or []) if avail else [],
+                approved_time_off=time_off_map.get(d.id, []),
+                ee_number=d.ee_number,
+            ))
+
+        config_rows = db.query(SchedulerConfig).all()
+        weight_map = {r.key: r.value for r in config_rows}
+        weights = SchedulerWeights(**{k: weight_map[k] for k in weight_map if hasattr(SchedulerWeights, k)})
+
+        # Phase 2: Solving (20-85%)
+        update_task(task_id, status=TaskStatus.SOLVING, progress=20, phase="Solver running")
+        result = solve(dealer_infos, demands, ride_share_groups, ws, weights=weights)
+
+        # Phase 3: Saving (85-95%)
+        update_task(task_id, status=TaskStatus.SAVING, progress=85, phase="Saving schedule")
+        existing = db.query(Schedule).filter(Schedule.week_start == ws, Schedule.dealer_type == dealer_type).first()
+        if existing:
+            db.query(ScheduleEntry).filter(ScheduleEntry.schedule_id == existing.id).delete()
+            existing.generated_at = datetime.now(timezone.utc)
+            existing.status = "draft"
+            existing.published_at = None
+            db.flush()
+            schedule = existing
+        else:
+            schedule = Schedule(week_start=ws, dealer_type=dealer_type)
+            db.add(schedule)
+            db.flush()
+
+        for dealer_id, assign_date, shift in result.assignments:
+            db.add(ScheduleEntry(schedule_id=schedule.id, dealer_id=dealer_id, date=assign_date, shift=shift))
+
+        # Compute stats
+        update_task(task_id, progress=90, phase="Computing statistics")
+        stats = _compute_stats(dealer_infos, avail_map, result, demands)
+        schedule.stats = stats
+
+        db.commit()
+
+        # Create notification
+        update_task(task_id, progress=95, phase="Sending notification")
+        _create_notification(db, schedule.id, result.solver_status, result.total_assignments, result.unfilled_slots, week_start_str)
+
+        gen_result = dict(
+            scheduleId=schedule.id, totalAssignments=result.total_assignments,
+            unfilledSlots=result.unfilled_slots, solverStatus=result.solver_status,
+            solveTimeMs=result.solve_time_ms, stats=stats,
+        )
+        update_task(task_id, status=TaskStatus.COMPLETED, progress=100, phase="Completed", result=gen_result)
+
+    except Exception as e:
+        logger.exception("Schedule generation failed")
+        update_task(task_id, status=TaskStatus.FAILED, progress=0, phase="Failed", error=str(e))
+    finally:
+        db.close()
+
+
+def _compute_stats(dealer_infos, avail_map, result, demands):
+    """Compute satisfaction and unfilled slot stats."""
+    SHIFT_MAP = {"9AM": "day", "4PM": "swing"}
+    # Build per-dealer assignment map
+    dealer_assignments: dict[str, list[tuple[date, str]]] = {}
+    for did, d, s in result.assignments:
+        dealer_assignments.setdefault(did, []).append((d, s))
+
+    fully_satisfied = 0
+    partially_satisfied = 0
+    unsatisfied = 0
+    total_with_pref = 0
+
+    for di in dealer_infos:
+        avail = avail_map.get(di.id)
+        if not avail:
+            continue
+        total_with_pref += 1
+        assigns = dealer_assignments.get(di.id, [])
+        if not assigns:
+            unsatisfied += 1
+            continue
+
+        # Shift satisfaction
+        shift_ok = True
+        if avail.shift and avail.shift != "mixed":
+            for _, s in assigns:
+                if SHIFT_MAP.get(s) != avail.shift:
+                    shift_ok = False
+                    break
+
+        # Days off satisfaction
+        pref_days = set(avail.preferred_days_off or [])
+        days_off_ok = True
+        if pref_days:
+            assigned_weekdays = {d.weekday() for d, _ in assigns}
+            # Convert JS weekday (0=Sun) to Python weekday (0=Mon)
+            py_pref = set()
+            mapping = {0: 6, 1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5}
+            for pd in pref_days:
+                py_pref.add(mapping.get(pd, pd))
+            if py_pref & assigned_weekdays:
+                days_off_ok = False
+
+        if shift_ok and days_off_ok:
+            fully_satisfied += 1
+        elif shift_ok or days_off_ok:
+            partially_satisfied += 1
+        else:
+            unsatisfied += 1
+
+    # Unfilled slots breakdown
+    assigned_count: dict[tuple[str, str], int] = {}
+    for _, d, s in result.assignments:
+        key = (d.isoformat(), s)
+        assigned_count[key] = assigned_count.get(key, 0) + 1
+    unfilled_breakdown = []
+    for dm in demands:
+        key = (dm.date.isoformat(), dm.shift)
+        assigned = assigned_count.get(key, 0)
+        if assigned < dm.dealers_needed:
+            unfilled_breakdown.append({
+                "date": dm.date.isoformat(), "shift": dm.shift,
+                "needed": dm.dealers_needed, "assigned": assigned,
+                "gap": dm.dealers_needed - assigned,
+            })
+
+    return {
+        "fullySatisfied": fully_satisfied,
+        "partiallySatisfied": partially_satisfied,
+        "unsatisfied": unsatisfied,
+        "totalWithPreference": total_with_pref,
+        "unfilledBreakdown": unfilled_breakdown,
+    }
+
+
+def _create_notification(db, schedule_id, solver_status, total, unfilled, week_start_str):
+    STATUS_LABELS = {
+        "OPTIMAL": "Optimal", "CLOUD_OPTIMAL": "Optimal",
+        "FEASIBLE": "Feasible", "CLOUD_FEASIBLE": "Feasible",
+        "INFEASIBLE": "Failed", "CLOUD_INFEASIBLE": "Failed",
+    }
+    STATUS_TYPES = {
+        "OPTIMAL": "success", "CLOUD_OPTIMAL": "success",
+        "FEASIBLE": "warning", "CLOUD_FEASIBLE": "warning",
+        "INFEASIBLE": "error", "CLOUD_INFEASIBLE": "error",
+    }
+    label = STATUS_LABELS.get(solver_status, "Unknown")
+    ntype = STATUS_TYPES.get(solver_status, "info")
+    msg = f"Week {week_start_str} schedule completed: {label}, {total} shifts"
+    if unfilled > 0:
+        msg += f", {unfilled} unfilled"
+    notif = Notification(title=label, message=msg, type=ntype, schedule_id=schedule_id)
+    db.add(notif)
+    db.commit()
 
 
 @router.delete("")
