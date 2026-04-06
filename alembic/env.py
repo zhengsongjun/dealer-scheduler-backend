@@ -15,6 +15,8 @@ from app.models.carpool import CarpoolGroup, CarpoolMember
 from app.models.projection import Projection
 from app.models.schedule import Schedule, ScheduleEntry
 from app.models.scheduler_config import SchedulerConfig
+from app.models.notification import Notification
+from app.models.task import TaskRecord
 
 config = context.config
 if config.config_file_name is not None:

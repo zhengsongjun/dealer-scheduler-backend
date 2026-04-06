@@ -12,7 +12,7 @@ from ..models.ride_share import RideShareRequest
 from ..models.notification import Notification
 from ..schemas.schedule import ScheduleGenerate, ScheduleOut, ScheduleEntryOut, GenerateResult, TaskStartResult, TaskStatusOut
 from ..services.scheduler import solve, DealerInfo, SlotDemand, RideShareGroup, SchedulerWeights
-from ..services.task_manager import create_task, update_task, get_task, TaskStatus
+from ..services.task_manager import create_task, update_task, get_task
 from ..models.scheduler_config import SchedulerConfig
 from ..auth.jwt import get_current_admin
 
@@ -50,12 +50,12 @@ def get_task_status(task_id: str):
     if not t:
         raise HTTPException(status_code=404, detail="Task not found")
     result = None
-    if t.result:
-        result = GenerateResult(**t.result)
+    if t["result"]:
+        result = GenerateResult(**t["result"])
     return TaskStatusOut(
-        taskId=t.task_id, status=t.status.value,
-        progress=t.progress, phase=t.phase,
-        result=result, error=t.error,
+        taskId=t["task_id"], status=t["status"],
+        progress=t["progress"], phase=t["phase"],
+        result=result, error=t["error"],
     )
 
 
@@ -69,7 +69,7 @@ def _run_generate(task_id: str, week_start_str: str, dealer_type: str):
         we = ws + timedelta(days=6)
 
         # Phase 1: Loading data (0-20%)
-        update_task(task_id, status=TaskStatus.LOADING, progress=5, phase="Loading projection data")
+        update_task(task_id, status="loading", progress=5, phase="Loading projection data")
         proj = db.query(Projection).filter(Projection.week_start == ws).first()
         demand_agg: dict[tuple[date, str], int] = {}
         for day_data in proj.data:
@@ -135,11 +135,11 @@ def _run_generate(task_id: str, week_start_str: str, dealer_type: str):
         weights = SchedulerWeights(**{k: weight_map[k] for k in weight_map if hasattr(SchedulerWeights, k)})
 
         # Phase 2: Solving (20-85%)
-        update_task(task_id, status=TaskStatus.SOLVING, progress=20, phase="Solver running")
+        update_task(task_id, status="solving", progress=20, phase="Solver running")
         result = solve(dealer_infos, demands, ride_share_groups, ws, weights=weights)
 
         # Phase 3: Saving (85-95%)
-        update_task(task_id, status=TaskStatus.SAVING, progress=85, phase="Saving schedule")
+        update_task(task_id, status="saving", progress=85, phase="Saving schedule")
         existing = db.query(Schedule).filter(Schedule.week_start == ws, Schedule.dealer_type == dealer_type).first()
         if existing:
             db.query(ScheduleEntry).filter(ScheduleEntry.schedule_id == existing.id).delete()
@@ -172,11 +172,11 @@ def _run_generate(task_id: str, week_start_str: str, dealer_type: str):
             unfilledSlots=result.unfilled_slots, solverStatus=result.solver_status,
             solveTimeMs=result.solve_time_ms, stats=stats,
         )
-        update_task(task_id, status=TaskStatus.COMPLETED, progress=100, phase="Completed", result=gen_result)
+        update_task(task_id, status="completed", progress=100, phase="Completed", result=gen_result)
 
     except Exception as e:
         logger.exception("Schedule generation failed")
-        update_task(task_id, status=TaskStatus.FAILED, progress=0, phase="Failed", error=str(e))
+        update_task(task_id, status="failed", progress=0, phase="Failed", error=str(e))
     finally:
         db.close()
 

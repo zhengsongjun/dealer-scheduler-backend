@@ -1,51 +1,31 @@
-"""In-memory task manager for async schedule generation."""
-import threading
+"""Database-backed task manager for async schedule generation."""
+import json
 import uuid
-import time
 import logging
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any
+
+from ..database import SessionLocal
+from ..models.task import TaskRecord
 
 logger = logging.getLogger(__name__)
 
 
-class TaskStatus(str, Enum):
-    PENDING = "pending"
-    LOADING = "loading"       # loading data from DB
-    SOLVING = "solving"       # solver running
-    SAVING = "saving"         # saving results to DB
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
-@dataclass
-class TaskInfo:
-    task_id: str
-    status: TaskStatus = TaskStatus.PENDING
-    progress: int = 0          # 0-100
-    phase: str = ""            # human-readable phase description
-    result: dict | None = None
-    error: str | None = None
-    created_at: float = field(default_factory=time.time)
-
-
-_tasks: dict[str, TaskInfo] = {}
-_lock = threading.Lock()
-
-
 def create_task() -> str:
     task_id = uuid.uuid4().hex[:12]
-    with _lock:
-        _tasks[task_id] = TaskInfo(task_id=task_id)
+    db = SessionLocal()
+    try:
+        db.add(TaskRecord(id=task_id, status="pending", progress=0, phase=""))
+        db.commit()
+    finally:
+        db.close()
     return task_id
 
 
-def update_task(task_id: str, *, status: TaskStatus | None = None,
+def update_task(task_id: str, *, status: str | None = None,
                 progress: int | None = None, phase: str | None = None,
                 result: dict | None = None, error: str | None = None):
-    with _lock:
-        t = _tasks.get(task_id)
+    db = SessionLocal()
+    try:
+        t = db.query(TaskRecord).filter(TaskRecord.id == task_id).first()
         if not t:
             return
         if status is not None:
@@ -55,20 +35,27 @@ def update_task(task_id: str, *, status: TaskStatus | None = None,
         if phase is not None:
             t.phase = phase
         if result is not None:
-            t.result = result
+            t.result_json = json.dumps(result)
         if error is not None:
             t.error = error
+        db.commit()
+    finally:
+        db.close()
 
 
-def get_task(task_id: str) -> TaskInfo | None:
-    with _lock:
-        return _tasks.get(task_id)
-
-
-def cleanup_old_tasks(max_age_seconds: int = 3600):
-    """Remove tasks older than max_age_seconds."""
-    now = time.time()
-    with _lock:
-        to_remove = [k for k, v in _tasks.items() if now - v.created_at > max_age_seconds]
-        for k in to_remove:
-            del _tasks[k]
+def get_task(task_id: str) -> dict | None:
+    db = SessionLocal()
+    try:
+        t = db.query(TaskRecord).filter(TaskRecord.id == task_id).first()
+        if not t:
+            return None
+        return {
+            "task_id": t.id,
+            "status": t.status,
+            "progress": t.progress,
+            "phase": t.phase,
+            "result": json.loads(t.result_json) if t.result_json else None,
+            "error": t.error,
+        }
+    finally:
+        db.close()
