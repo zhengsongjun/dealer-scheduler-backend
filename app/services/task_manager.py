@@ -2,6 +2,7 @@
 import json
 import uuid
 import logging
+from datetime import datetime, timedelta, timezone
 
 from ..database import SessionLocal
 from ..models.task import TaskRecord
@@ -9,10 +10,20 @@ from ..models.task import TaskRecord
 logger = logging.getLogger(__name__)
 
 
+def _cleanup_old_tasks(db, max_age_hours: int = 24):
+    """Delete completed/failed tasks older than max_age_hours."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+    db.query(TaskRecord).filter(
+        TaskRecord.status.in_(["completed", "failed"]),
+        TaskRecord.created_at < cutoff,
+    ).delete(synchronize_session=False)
+
+
 def create_task() -> str:
     task_id = uuid.uuid4().hex[:12]
     db = SessionLocal()
     try:
+        _cleanup_old_tasks(db)
         db.add(TaskRecord(id=task_id, status="pending", progress=0, phase=""))
         db.commit()
     finally:
