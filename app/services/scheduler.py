@@ -156,6 +156,22 @@ def _build_cloud_model(
         obj_coeffs[sid9] = 0.0
         obj_coeffs[sid4] = 0.0
 
+    # pref_count[dealer] = 0~7 for H6 (seniority shift-preference priority)
+    pc_vars: dict[str, str] = {}
+    cloud_pref_shift_map: dict[str, str] = {}  # dealer_id -> "9AM"/"4PM"
+    for d in dealers:
+        if d.availability_shift == "day":
+            cloud_pref_shift_map[d.id] = "9AM"
+        elif d.availability_shift == "swing":
+            cloud_pref_shift_map[d.id] = "4PM"
+    for d in dealers:
+        if d.id in cloud_pref_shift_map:
+            sid = str(vid); vid += 1
+            pc_vars[d.id] = sid
+            var_ids.append(sid)
+            var_names.append(f"pc_{d.id}")
+            obj_coeffs[sid] = 0.0
+
     # shortfall[day, shift] = int var (0..needed) for S0-demand penalty
     shortfall: dict[tuple[date, str], str] = {}
     shortfall_ub: dict[str, int] = {}
@@ -202,6 +218,7 @@ def _build_cloud_model(
     all_has = set(has_vars.values())
     all_w9 = set(w9_vars.values())
     all_w4 = set(w4_vars.values())
+    all_pc = set(pc_vars.values())
     all_shortfall = set(shortfall.values())
     all_rs_diff = set(rs_diff_vars.values())
     n = len(var_ids)
@@ -219,6 +236,8 @@ def _build_cloud_model(
             upper_bounds.append(5.0)
         elif sid in all_has or sid in all_w9 or sid in all_w4:
             upper_bounds.append(1.0)
+        elif sid in all_pc:
+            upper_bounds.append(7.0)
         elif sid in all_rs_diff:
             upper_bounds.append(1.0)
         else:
@@ -287,6 +306,36 @@ def _build_cloud_model(
         add_constraint(0.0, BIG, s4_terms + [(w4_vars[d.id], -1.0)])
         # w9 + w4 <= 1 (HARD — cannot work both shift types)
         add_constraint(-BIG, 1.0, [(w9_vars[d.id], 1.0), (w4_vars[d.id], 1.0)])
+
+    # C6: H6 — Seniority shift-preference priority (HARD)
+    # pref_count[d] = number of days dealer d is assigned to their preferred shift (0~7)
+    # Linearized: pc = sum(x[d, day, pref_shift]) for all days
+    for did, pref_s in cloud_pref_shift_map.items():
+        pc_id = pc_vars[did]
+        pref_terms = [(x[did, day, pref_s], 1.0) for day in week_dates]
+        # pc = sum_pref  →  sum_pref - pc = 0
+        add_constraint(0.0, 0.0, pref_terms + [(pc_id, -1.0)])
+
+    # Sort dealers by ee_number within each preference group, then chain constraints
+    cloud_dealers_by_pref: dict[str, list[tuple[int, str]]] = {}
+    for d in dealers:
+        if d.id in cloud_pref_shift_map and d.ee_number:
+            try:
+                ee_num = int(d.ee_number)
+            except ValueError:
+                continue
+            pref_s = cloud_pref_shift_map[d.id]
+            cloud_dealers_by_pref.setdefault(pref_s, []).append((ee_num, d.id))
+    for pref_s in cloud_dealers_by_pref:
+        cloud_dealers_by_pref[pref_s].sort()  # ascending ee_number = most senior first
+
+    # Chain constraint: pc[senior] >= pc[junior] for adjacent pairs (O(n))
+    for pref_s, sorted_dealers in cloud_dealers_by_pref.items():
+        for i in range(len(sorted_dealers) - 1):
+            senior_id = sorted_dealers[i][1]
+            junior_id = sorted_dealers[i + 1][1]
+            # pc[senior] - pc[junior] >= 0
+            add_constraint(0.0, BIG, [(pc_vars[senior_id], 1.0), (pc_vars[junior_id], -1.0)])
 
     # C5: S4 ride-share — soft via diff vars: diff >= x[anchor] - x[m], diff >= x[m] - x[anchor]
     for gk, members in rs_groups_map.items():
@@ -430,7 +479,7 @@ def _solve_cloud(
     ride_share_groups: list[RideShareGroup],
     week_start: date,
     weights: SchedulerWeights,
-    timeout_seconds: int = 60,
+    timeout_seconds: int = 600,
 ) -> ScheduleResult:
     """Call Google MathOpt API with CP-SAT solver."""
     start_time = time.time()
@@ -603,6 +652,43 @@ def _solve_local(
                 for s in shifts:
                     model.add(x[d.id, day, s] == 0)
 
+    # H6: Seniority shift-preference priority (HARD)
+    # Senior employees must get at least as many preferred-shift days as junior ones.
+    # pref_count[d] = number of days dealer d is assigned to their preferred shift (0~7).
+    # Chain constraint: for adjacent seniors by ee_number, pref_count[senior] >= pref_count[junior].
+    pref_shift_map: dict[str, str] = {}  # dealer_id -> preferred shift ("9AM"/"4PM")
+    pref_count: dict[str, cp_model.IntVar] = {}
+    for d in dealers:
+        if d.availability_shift == "day":
+            pref_shift_map[d.id] = "9AM"
+        elif d.availability_shift == "swing":
+            pref_shift_map[d.id] = "4PM"
+    for did, pref_s in pref_shift_map.items():
+        pc = model.new_int_var(0, 7, f"pref_count_{did}")
+        model.add(pc == sum(x[did, day, pref_s] for day in week_dates))
+        pref_count[did] = pc
+
+    # Sort dealers with a specific preference by ee_number (ascending = most senior first)
+    # Then group by preferred shift and apply chain constraints within each group.
+    dealers_with_pref: dict[str, list[str]] = {}  # shift -> [dealer_ids sorted by seniority]
+    for d in dealers:
+        if d.id in pref_shift_map and d.ee_number:
+            try:
+                ee_num = int(d.ee_number)
+            except ValueError:
+                continue
+            pref_s = pref_shift_map[d.id]
+            dealers_with_pref.setdefault(pref_s, []).append((ee_num, d.id))
+    for pref_s in dealers_with_pref:
+        dealers_with_pref[pref_s].sort()  # ascending ee_number = most senior first
+
+    # Chain constraint: pref_count[rank_i] >= pref_count[rank_i+1] (O(n) instead of O(n²))
+    for pref_s, sorted_dealers in dealers_with_pref.items():
+        for i in range(len(sorted_dealers) - 1):
+            senior_id = sorted_dealers[i][1]
+            junior_id = sorted_dealers[i + 1][1]
+            model.add(pref_count[senior_id] >= pref_count[junior_id])
+
     # ════════════════════════════════════════
     # SOFT CONSTRAINTS (via objective)
     # ════════════════════════════════════════
@@ -724,7 +810,7 @@ def solve(
     ride_share_groups: list[RideShareGroup],
     week_start: date,
     weights: SchedulerWeights | None = None,
-    timeout_seconds: int = 30,
+    timeout_seconds: int = 600,
 ) -> ScheduleResult:
     if weights is None:
         weights = SchedulerWeights()
