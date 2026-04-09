@@ -24,4 +24,4 @@ class ScheduleEntry(Base):
     schedule_id: Mapped[int] = mapped_column(Integer, ForeignKey("schedules.id", ondelete="CASCADE"))
     dealer_id: Mapped[str] = mapped_column(String(10), ForeignKey("dealers.id"))
     date: Mapped[date] = mapped_column(Date)
-    shift: Mapped[str] = mapped_column(String(10))  # 9AM | 4PM
+    shift: Mapped[str] = mapped_column(String(10))  # 8AM | 4PM | 8PM

@@ -17,8 +17,8 @@ class DealerInfo:
     id: str
     employment: str  # full_time | part_time
     days_off: list[int] = field(default_factory=list)  # 0=Sun..6=Sat
-    preferred_shift: str = "flexible"  # 9AM | 4PM | flexible
-    availability_shift: str | None = None  # day | swing | mixed
+    preferred_shift: str = "flexible"  # 8AM | 4PM | 8PM | flexible
+    availability_shift: str | None = None  # day | swing | night | mixed
     preferred_days_off: list[int] = field(default_factory=list)
     approved_time_off: list[date] = field(default_factory=list)
     ride_share_group: str | None = None
@@ -28,7 +28,7 @@ class DealerInfo:
 @dataclass
 class SlotDemand:
     date: date
-    shift: str  # 9AM | 4PM
+    shift: str  # 8AM | 4PM | 8PM
     dealers_needed: int
 
 
@@ -50,6 +50,8 @@ class SchedulerWeights:
     ride_share_mismatch: int = -200
     min_one_shift_reward: int = 500
     fairness_gap_penalty: int = -200
+    overtime_flex_pct: int = 5
+    shift_float_hours: int = 2
 
 
 @dataclass
@@ -82,11 +84,18 @@ def _build_cloud_model(
     Returns (model_json, var_map) where var_map maps var_id -> (dealer_id, date, shift).
     """
     week_dates = [week_start + timedelta(days=i) for i in range(7)]
-    shifts = ["9AM", "4PM"]
+    shifts = ["8AM", "4PM", "8PM"]
     demand_map: dict[tuple[date, str], int] = {}
     for d in demands:
         demand_map[(d.date, d.shift)] = d.dealers_needed
     dealer_map = {d.id: d for d in dealers}
+
+    # Shift adjacency for float tolerance: shifts within shift_float_hours are "adjacent"
+    SHIFT_HOURS = {"8AM": 8, "4PM": 16, "8PM": 20}
+    float_h = weights.shift_float_hours
+    def _adjacent_shifts(s: str) -> list[str]:
+        h = SHIFT_HOURS[s]
+        return [s2 for s2 in shifts if s2 != s and abs(SHIFT_HOURS[s2] - h) <= float_h]
 
     # ── Variables ──
     var_ids: list[str] = []
@@ -143,27 +152,26 @@ def _build_cloud_model(
         obj_coeffs[sid] = 0.0
         vid += 1
 
-    # works_9am[dealer], works_4pm[dealer] for H4 (hard shift consistency)
-    w9_vars: dict[str, str] = {}
-    w4_vars: dict[str, str] = {}
+    # works_shift[dealer, shift] = 0/1 for H4 (hard shift consistency: max 1 shift type per week)
+    ws_vars: dict[tuple[str, str], str] = {}  # (dealer_id, shift) -> var_id
     for d in dealers:
-        sid9 = str(vid); vid += 1
-        sid4 = str(vid); vid += 1
-        w9_vars[d.id] = sid9
-        w4_vars[d.id] = sid4
-        var_ids.extend([sid9, sid4])
-        var_names.extend([f"w9_{d.id}", f"w4_{d.id}"])
-        obj_coeffs[sid9] = 0.0
-        obj_coeffs[sid4] = 0.0
+        for s in shifts:
+            sid = str(vid); vid += 1
+            ws_vars[d.id, s] = sid
+            var_ids.append(sid)
+            var_names.append(f"ws_{d.id}_{s}")
+            obj_coeffs[sid] = 0.0
 
     # pref_count[dealer] = 0~7 for H6 (seniority shift-preference priority)
     pc_vars: dict[str, str] = {}
-    cloud_pref_shift_map: dict[str, str] = {}  # dealer_id -> "9AM"/"4PM"
+    cloud_pref_shift_map: dict[str, str] = {}  # dealer_id -> "8AM"/"4PM"/"8PM"
     for d in dealers:
         if d.availability_shift == "day":
-            cloud_pref_shift_map[d.id] = "9AM"
+            cloud_pref_shift_map[d.id] = "8AM"
         elif d.availability_shift == "swing":
             cloud_pref_shift_map[d.id] = "4PM"
+        elif d.availability_shift == "night":
+            cloud_pref_shift_map[d.id] = "8PM"
     for d in dealers:
         if d.id in cloud_pref_shift_map:
             sid = str(vid); vid += 1
@@ -216,8 +224,7 @@ def _build_cloud_model(
     # Build variable arrays
     all_total = set(total_vars.values())
     all_has = set(has_vars.values())
-    all_w9 = set(w9_vars.values())
-    all_w4 = set(w4_vars.values())
+    all_ws = set(ws_vars.values())
     all_pc = set(pc_vars.values())
     all_shortfall = set(shortfall.values())
     all_rs_diff = set(rs_diff_vars.values())
@@ -234,7 +241,7 @@ def _build_cloud_model(
             upper_bounds.append(5.0)
         elif sid in (max_sid, min_sid, gap_sid):
             upper_bounds.append(5.0)
-        elif sid in all_has or sid in all_w9 or sid in all_w4:
+        elif sid in all_has or sid in all_ws:
             upper_bounds.append(1.0)
         elif sid in all_pc:
             upper_bounds.append(7.0)
@@ -294,18 +301,16 @@ def _build_cloud_model(
             add_constraint(-BIG, upper, terms)  # assigned <= ceil(needed*1.1)
             # shortfall <= needed (already via upper bound on var)
 
-    # C4: H4 — shift consistency (HARD): w9 + w4 <= 1 (no mixing shifts in a week)
+    # C4: H4 — shift consistency (HARD): at most 1 shift type per week
     for d in dealers:
-        s9_terms = [(x[d.id, day, "9AM"], 1.0) for day in week_dates]
-        s4_terms = [(x[d.id, day, "4PM"], 1.0) for day in week_dates]
-        # sum_9 <= 7*w9, sum_9 >= w9
-        add_constraint(-BIG, 0.0, s9_terms + [(w9_vars[d.id], -7.0)])
-        add_constraint(0.0, BIG, s9_terms + [(w9_vars[d.id], -1.0)])
-        # sum_4 <= 7*w4, sum_4 >= w4
-        add_constraint(-BIG, 0.0, s4_terms + [(w4_vars[d.id], -7.0)])
-        add_constraint(0.0, BIG, s4_terms + [(w4_vars[d.id], -1.0)])
-        # w9 + w4 <= 1 (HARD — cannot work both shift types)
-        add_constraint(-BIG, 1.0, [(w9_vars[d.id], 1.0), (w4_vars[d.id], 1.0)])
+        for s in shifts:
+            s_terms = [(x[d.id, day, s], 1.0) for day in week_dates]
+            ws_id = ws_vars[d.id, s]
+            # sum_s <= 7*ws, sum_s >= ws
+            add_constraint(-BIG, 0.0, s_terms + [(ws_id, -7.0)])
+            add_constraint(0.0, BIG, s_terms + [(ws_id, -1.0)])
+        # sum of all ws <= 1 (can only work one shift type)
+        add_constraint(-BIG, 1.0, [(ws_vars[d.id, s], 1.0) for s in shifts])
 
     # C6: H6 — Seniority shift-preference priority (HARD)
     # pref_count[d] = number of days dealer d is assigned to their preferred shift (0~7)
@@ -391,16 +396,22 @@ def _build_cloud_model(
                 for s in shifts:
                     obj_coeffs[x[d.id, day, s]] += score
 
-    # S2: shift preference
+    # S2: shift preference (with float tolerance for adjacent shifts)
+    PREF_TO_SHIFT = {"day": "8AM", "swing": "4PM", "night": "8PM"}
     for d in dealers:
         pref = d.availability_shift
+        pref_s = PREF_TO_SHIFT.get(pref)
         for day in week_dates:
-            if pref == "day":
-                obj_coeffs[x[d.id, day, "9AM"]] += weights.shift_pref_match
-                obj_coeffs[x[d.id, day, "4PM"]] += weights.shift_pref_mismatch
-            elif pref == "swing":
-                obj_coeffs[x[d.id, day, "4PM"]] += weights.shift_pref_match
-                obj_coeffs[x[d.id, day, "9AM"]] += weights.shift_pref_mismatch
+            if pref_s:
+                adj = _adjacent_shifts(pref_s)
+                for s in shifts:
+                    if s == pref_s:
+                        obj_coeffs[x[d.id, day, s]] += weights.shift_pref_match
+                    elif s in adj:
+                        # Adjacent shift within float hours: no penalty (neutral)
+                        pass
+                    else:
+                        obj_coeffs[x[d.id, day, s]] += weights.shift_pref_mismatch
             else:
                 for s in shifts:
                     obj_coeffs[x[d.id, day, s]] += weights.shift_flexible_bonus
@@ -583,10 +594,17 @@ def _solve_local(
     start_time = time.time()
     model = cp_model.CpModel()
     week_dates = [week_start + timedelta(days=i) for i in range(7)]
-    shifts = ["9AM", "4PM"]
+    shifts = ["8AM", "4PM", "8PM"]
     demand_map = {(d.date, d.shift): d.dealers_needed for d in demands}
     dealer_map = {d.id: d for d in dealers}
     seniority = _compute_seniority_scores(dealers, week_start, weights.seniority_max_score)
+
+    # Shift adjacency for float tolerance
+    SHIFT_HOURS = {"8AM": 8, "4PM": 16, "8PM": 20}
+    float_h = weights.shift_float_hours
+    def _adjacent_shifts(s: str) -> list[str]:
+        h = SHIFT_HOURS[s]
+        return [s2 for s2 in shifts if s2 != s and abs(SHIFT_HOURS[s2] - h) <= float_h]
 
     # ── Decision variables ──
     x = {}
@@ -622,7 +640,7 @@ def _solve_local(
                 # assigned <= ceil(needed * 1.1) (hard upper limit)
                 model.add(assigned <= upper)
 
-    # H2: Max 1 shift per day (can't work both 9AM and 4PM same day)
+    # H2: Max 1 shift per day
     for d in dealers:
         for day in week_dates:
             model.add(sum(x[d.id, day, s] for s in shifts) <= 1)
@@ -633,17 +651,15 @@ def _solve_local(
         totals[d.id] = model.new_int_var(0, 5, f"tot_{d.id}")
         model.add(totals[d.id] == sum(x[d.id, day, s] for day in week_dates for s in shifts))
 
-    # H4: Shift consistency (HARD) — cannot mix 9AM and 4PM in the same week
+    # H4: Shift consistency (HARD) — can only work one shift type per week
     for d in dealers:
-        works_9am = model.new_bool_var(f"w9_{d.id}")
-        works_4pm = model.new_bool_var(f"w4_{d.id}")
-        sum_9 = sum(x[d.id, day, "9AM"] for day in week_dates)
-        sum_4 = sum(x[d.id, day, "4PM"] for day in week_dates)
-        model.add(sum_9 >= 1).only_enforce_if(works_9am)
-        model.add(sum_9 == 0).only_enforce_if(works_9am.Not())
-        model.add(sum_4 >= 1).only_enforce_if(works_4pm)
-        model.add(sum_4 == 0).only_enforce_if(works_4pm.Not())
-        model.add(works_9am + works_4pm <= 1)
+        ws_local = {}
+        for s in shifts:
+            ws_local[s] = model.new_bool_var(f"ws_{d.id}_{s}")
+            sum_s = sum(x[d.id, day, s] for day in week_dates)
+            model.add(sum_s >= 1).only_enforce_if(ws_local[s])
+            model.add(sum_s == 0).only_enforce_if(ws_local[s].Not())
+        model.add(sum(ws_local[s] for s in shifts) <= 1)
 
     # H5: Approved time-off → cannot be assigned
     for d in dealers:
@@ -656,13 +672,15 @@ def _solve_local(
     # Senior employees must get at least as many preferred-shift days as junior ones.
     # pref_count[d] = number of days dealer d is assigned to their preferred shift (0~7).
     # Chain constraint: for adjacent seniors by ee_number, pref_count[senior] >= pref_count[junior].
-    pref_shift_map: dict[str, str] = {}  # dealer_id -> preferred shift ("9AM"/"4PM")
+    pref_shift_map: dict[str, str] = {}  # dealer_id -> preferred shift ("8AM"/"4PM"/"8PM")
     pref_count: dict[str, cp_model.IntVar] = {}
     for d in dealers:
         if d.availability_shift == "day":
-            pref_shift_map[d.id] = "9AM"
+            pref_shift_map[d.id] = "8AM"
         elif d.availability_shift == "swing":
             pref_shift_map[d.id] = "4PM"
+        elif d.availability_shift == "night":
+            pref_shift_map[d.id] = "8PM"
     for did, pref_s in pref_shift_map.items():
         pc = model.new_int_var(0, 7, f"pref_count_{did}")
         model.add(pc == sum(x[did, day, pref_s] for day in week_dates))
@@ -714,16 +732,22 @@ def _solve_local(
                 for s in shifts:
                     obj.append(score * x[d.id, day, s])
 
-    # S2: Shift preference
+    # S2: Shift preference (with float tolerance for adjacent shifts)
+    PREF_TO_SHIFT = {"day": "8AM", "swing": "4PM", "night": "8PM"}
     for d in dealers:
         pref = d.availability_shift
+        pref_s = PREF_TO_SHIFT.get(pref)
         for day in week_dates:
-            if pref == "day":
-                obj.append(weights.shift_pref_match * x[d.id, day, "9AM"])
-                obj.append(weights.shift_pref_mismatch * x[d.id, day, "4PM"])
-            elif pref == "swing":
-                obj.append(weights.shift_pref_match * x[d.id, day, "4PM"])
-                obj.append(weights.shift_pref_mismatch * x[d.id, day, "9AM"])
+            if pref_s:
+                adj = _adjacent_shifts(pref_s)
+                for s in shifts:
+                    if s == pref_s:
+                        obj.append(weights.shift_pref_match * x[d.id, day, s])
+                    elif s in adj:
+                        # Adjacent shift within float hours: no penalty (neutral)
+                        pass
+                    else:
+                        obj.append(weights.shift_pref_mismatch * x[d.id, day, s])
             else:
                 for s in shifts:
                     obj.append(weights.shift_flexible_bonus * x[d.id, day, s])

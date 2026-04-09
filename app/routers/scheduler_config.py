@@ -18,11 +18,20 @@ DEFAULT_CONFIGS = [
     {'key': 'ride_share_mismatch', 'value': -200, 'label': 'Ride Share Mismatch', 'description': 'S4: Penalty per ride-share pair mismatch'},
     {'key': 'min_one_shift_reward', 'value': 500, 'label': 'Min One Shift Reward', 'description': 'S5: Reward for giving dealer at least 1 shift'},
     {'key': 'fairness_gap_penalty', 'value': -200, 'label': 'Fairness Gap Penalty', 'description': 'S6: Penalty multiplied by max-min shift gap'},
+    {'key': 'overtime_flex_pct', 'value': 5, 'label': 'Overtime Flex %', 'description': 'S7: Allowed overtime percentage per day (default 5%)'},
+    {'key': 'shift_float_hours', 'value': 2, 'label': 'Shift Float Hours', 'description': 'S7: Hours of shift float tolerance before penalizing satisfaction (default 2)'},
 ]
 
 
 @router.get("")
 def list_configs(db: Session = Depends(get_db)):
+    # Auto-insert any missing config keys
+    existing_keys = {r.key for r in db.query(SchedulerConfig.key).all()}
+    missing = [c for c in DEFAULT_CONFIGS if c['key'] not in existing_keys]
+    if missing:
+        for c in missing:
+            db.add(SchedulerConfig(**c))
+        db.commit()
     rows = db.query(SchedulerConfig).order_by(SchedulerConfig.id).all()
     return [SchedulerConfigOut(key=r.key, value=r.value, label=r.label, description=r.description) for r in rows]
 

@@ -5,7 +5,7 @@ from datetime import datetime
 class AvailabilityCreate(BaseModel):
     eeNumber: str
     weekStart: str  # YYYY-MM-DD
-    shift: str  # day | swing | mixed
+    shift: str  # day | swing | night | mixed
     preferredDaysOff: list[int] = []
 
 

@@ -29,7 +29,7 @@ LAST_NAMES = [
 
 TYPES = ['tournament', 'cash', 'restart']
 TYPE_WEIGHTS = [0.5, 0.35, 0.15]
-SHIFTS = ['9AM', '4PM', 'flexible']
+SHIFTS = ['8AM', '4PM', '8PM', 'flexible']
 
 
 def seed(force=False):
@@ -90,6 +90,8 @@ def seed(force=False):
                 SchedulerConfig(key='ride_share_mismatch', value=-200, label='Ride Share Mismatch', description='S4: Penalty per ride-share pair mismatch'),
                 SchedulerConfig(key='min_one_shift_reward', value=500, label='Min One Shift Reward', description='S5: Reward for giving dealer at least 1 shift'),
                 SchedulerConfig(key='fairness_gap_penalty', value=-200, label='Fairness Gap Penalty', description='S6: Penalty multiplied by max-min shift gap'),
+                SchedulerConfig(key='overtime_flex_pct', value=5, label='Overtime Flex %', description='S7: Allowed overtime percentage per day (default 5%)'),
+                SchedulerConfig(key='shift_float_hours', value=2, label='Shift Float Hours', description='S7: Hours of shift float tolerance before penalizing satisfaction (default 2)'),
             ]
             db.add_all(defaults)
             db.commit()

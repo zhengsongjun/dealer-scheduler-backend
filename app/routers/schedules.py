@@ -1,3 +1,4 @@
+import re
 import threading
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -17,6 +18,32 @@ from ..models.scheduler_config import SchedulerConfig
 from ..auth.jwt import get_current_admin
 
 router = APIRouter()
+
+
+def _time_to_shift(time_str: str) -> str:
+    """Map a projection time slot string (e.g. '11 AM', '3 PM') to a shift.
+
+    Rules:
+      before 1 PM  -> 8AM  (day)
+      1 PM - 5 PM  -> 4PM  (swing)
+      6 PM+        -> 8PM  (night)
+    """
+    s = time_str.strip().upper()
+    m = re.match(r"(\d{1,2})\s*(AM|PM)", s)
+    if not m:
+        return "8AM"  # fallback
+    hour = int(m.group(1))
+    ampm = m.group(2)
+    # Convert to 24h
+    if ampm == "AM":
+        h24 = 0 if hour == 12 else hour
+    else:
+        h24 = hour if hour == 12 else hour + 12
+    if h24 < 13:
+        return "8AM"
+    if h24 < 18:
+        return "4PM"
+    return "8PM"
 
 
 @router.post("/generate")
@@ -75,8 +102,7 @@ def _run_generate(task_id: str, week_start_str: str, dealer_type: str):
         for day_data in proj.data:
             d = date.fromisoformat(day_data["date"])
             for slot in day_data.get("slots", []):
-                time_str = slot["time"].upper().strip()
-                shift = "9AM" if ("9" in time_str or "10" in time_str or "11" in time_str or "12" in time_str) else "4PM"
+                shift = _time_to_shift(slot["time"])
                 key = (d, shift)
                 demand_agg[key] = demand_agg.get(key, 0) + slot["dealersNeeded"]
         demands = [SlotDemand(date=k[0], shift=k[1], dealers_needed=v) for k, v in demand_agg.items()]
@@ -183,7 +209,20 @@ def _run_generate(task_id: str, week_start_str: str, dealer_type: str):
 
 def _compute_stats(dealer_infos, avail_map, result, demands):
     """Compute satisfaction and unfilled slot stats."""
-    SHIFT_MAP = {"9AM": "day", "4PM": "swing"}
+    SHIFT_MAP = {"8AM": "day", "4PM": "swing", "8PM": "night"}
+    # Adjacent shifts within 2-hour float tolerance (no satisfaction penalty)
+    SHIFT_HOURS = {"8AM": 8, "4PM": 16, "8PM": 20}
+    FLOAT_HOURS = 2
+    def _is_compatible(assigned_shift: str, pref_shift_name: str) -> bool:
+        """Check if assigned shift matches or is adjacent to preferred shift."""
+        if SHIFT_MAP.get(assigned_shift) == pref_shift_name:
+            return True
+        # Find the preferred shift code
+        pref_code = next((k for k, v in SHIFT_MAP.items() if v == pref_shift_name), None)
+        if not pref_code:
+            return False
+        return abs(SHIFT_HOURS.get(assigned_shift, 0) - SHIFT_HOURS.get(pref_code, 0)) <= FLOAT_HOURS
+
     # Build per-dealer assignment map
     dealer_assignments: dict[str, list[tuple[date, str]]] = {}
     for did, d, s in result.assignments:
@@ -204,11 +243,11 @@ def _compute_stats(dealer_infos, avail_map, result, demands):
             unsatisfied += 1
             continue
 
-        # Shift satisfaction
+        # Shift satisfaction (with float tolerance)
         shift_ok = True
         if avail.shift and avail.shift != "mixed":
             for _, s in assigns:
-                if SHIFT_MAP.get(s) != avail.shift:
+                if not _is_compatible(s, avail.shift):
                     shift_ok = False
                     break
 
